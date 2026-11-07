@@ -1,0 +1,91 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# 发版需要写权限；构建产物同时上传 artifact，即使发版被仓库策略限制也能拿到 APK。
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ubuntu-latest 预装 Android SDK（/usr/local/lib/android/sdk），但 sdkmanager
+      # 不在 PATH 且版本目录名会变；这里自行定位，避免依赖会安装已下架 tools 包的第三方 action。
+      - name: Set up Android SDK 35
+        shell: bash
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKM=$(find "$SDK/cmdline-tools" -type f -path '*/bin/sdkmanager' 2>/dev/null | head -1)
+          if [ -z "$SDKM" ]; then SDKM="$SDK/tools/bin/sdkmanager"; fi
+          echo "ANDROID_HOME=$SDK" | tee -a "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "sdkmanager=$SDKM"
+          test -x "$SDKM"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          "$SDKM" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build release APK
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: 准备交付文件
+        shell: bash
+        run: |
+          set -e
+          VER=1.0.0
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/FvOcrBridge-v${VER}-release.apk"
+          git archive --format=zip --prefix="FvOcrBridge-v${VER}/" \
+            -o "dist/FvOcrBridge-v${VER}-src.zip" HEAD
+          ls -lh dist/
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FvOcrBridge-release
+          path: dist/*
+          if-no-files-found: error
+
+      - name: 发布 Release（幂等）
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: 1.0.0
+        run: |
+          set -e
+          TAG="v${VER}"
+          cat > /tmp/notes.md <<'EOF'
+          ## FvOcrBridge v1.0.0
+
+          把 FV 悬浮球「自动文字识别」接到独立本地 OCR 引擎（MiOcrStandalone），
+          不再依赖小米相册、不 Hook 相册进程，LSPosed 作用域只勾 `com.fooview.android.fooview`。
+
+          - 无界面、无桌面图标、不联网、模块本身不含任何 so / 模型
+          - 引擎未装 / 未就绪 / 超时自动回退 FV 自带 PaddleOCR
+          - **前提**：需另装 MiOcrStandalone v1.0.3+（内含小米私有 libmiocr.so，不随本仓库分发）
+
+          附件：`FvOcrBridge-v1.0.0-release.apk`（模块）、`FvOcrBridge-v1.0.0-src.zip`（源码）。
+          安装步骤、shell 诊断命令与排障见 README.md。
+          EOF
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.apk dist/*.zip --clobber
+          else
+            gh release create "$TAG" dist/*.apk dist/*.zip \
+              --title "FvOcrBridge ${TAG}" --notes-file /tmp/notes.md
+          fi
+          gh release view "$TAG" --json assets --jq '.assets[].name'
