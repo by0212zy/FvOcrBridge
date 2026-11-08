@@ -6,18 +6,83 @@
 不用装第二个 App、不用小米相册、不 Hook 相册进程、不用下载 FV 的百度语言包，
 LSPosed 里**只勾一个作用域** `com.fooview.android.fooview`。
 
-基于 [libxposed 现代 API 102](https://github.com/libxposed/api)：无界面、无桌面图标、
+基于 [libxposed 现代 API 102](https://github.com/libxposed/api)：无桌面图标、
 不联网、不修改系统属性与 Settings 数据库、识别全部在本机离线完成。
 
 > 与 `GalleryOCRBridge` **二选一**，不要同时在两个模块里勾选 FV 悬浮球作用域。
 
 ---
 
-## v2.0.0 改了什么
+## ⚠️ v2.0.1：修复「装了没反应 / Unknown authority」
 
-v1.0.0 是「模块 + 独立引擎 App」两个安装包，本版按需求合并成**一个 APK**：
+**v2.0.0 在 HyperOS / MIUI 上无效，不是代码 bug，是系统的关联启动管控。** 真机日志（`LSPosed_20261108_153319.zip`）里写得很清楚：
 
-| | v1.0.0 | **v2.0.0** |
+```
+WakePathChecker: MIUILOG-AutoStart, Service/Provider/Broadcast Reject
+  caller=com.fooview.android.fooview callee=com.fvocr.bridge
+  classname=com.fvocr.bridge.OcrProvider wakeType=4
+ContentProviderHelper: Unable to launch app for com.fvocr.bridge.ocr
+ActivityThread: Failed to find provider info for com.fvocr.bridge.ocr
+FvOcrBridge: ocr_bitmap 第1次异常: java.lang.IllegalArgumentException:
+             Unknown authority com.fvocr.bridge.ocr
+```
+
+`com.fvocr.bridge:ocr` 进程**一次都没被启动过**。系统不允许普通应用 FV 悬浮球
+跨应用拉起另一个应用的 ContentProvider，于是 authority 解析不到，识别一直回退。
+旧版 `GalleryOCRBridge` 能用，是因为它借道小米相册这个系统白名单应用，绕开了检查。
+
+**修复思路**：`ContentProviderHelper` 只在「需要拉起进程」时才做这项检查 ——
+只要 `:ocr` 进程**已经在运行**，就直接走已运行分支返回 provider。所以 v2.0.1 让
+`:ocr` 进程由**模块自己**启动并前台常驻（自己启自己不属于关联启动，不受拦截）。
+
+| v2.0.0 | **v2.0.1** |
+| --- | --- |
+| `:ocr` 只能被 FV 拉起 → 被 MIUI 拒绝 | 新增 `OcrService` 前台常驻 + `BootReceiver` 自激活 + 模块设置页 |
+| 日志 `Unknown authority`，识别全回退 | 激活后 `:ocr` 在线，`ocr_bitmap` 正常落地 |
+| 无界面 | 增加 **MODULE_SETTINGS 设置页**（仍无桌面图标） |
+| 失败提示让人去跑 `self_test` | 直接打印根因与一次性激活命令 |
+| 无界面，无法手动激活 | 打开设置页即自动激活，可查看状态 / 自检 |
+
+---
+
+## 安装（四步，第 3 步是关键）
+
+1. 安装本 APK（Release 附件 `FvOcrBridge-v2.0.1-release.apk`）。
+2. LSPosed → 模块 → 启用 **FV 识图桥**，作用域**只勾** `com.fooview.android.fooview`。
+3. **激活引擎进程（必须做一次）**：打开 LSPosed 模块列表里本模块的**设置页**
+   （点模块 → 设置 / 齿轮），页面打开时会自动激活并显示引擎状态。
+   点一下「② 运行自检」，返回 `✓ 引擎可用` 且 `text` 有内容即全部就绪。
+4. 重启 FV 悬浮球（或重启手机）。之后直接用 FV 原来的「自动文字识别」，
+   **日常不需要任何命令**。
+
+> 桌面**不会**出现图标 —— 设置页只能从 LSPosed 模块列表进入，这是正常的。
+
+### 引擎激活的四种方式（任选其一）
+
+| 方式 | 操作 | 说明 |
+| --- | --- | --- |
+| **① 设置页（推荐）** | LSPosed 模块列表点开本模块设置页 | 打开即自动激活，零命令，还能看状态 / 自检 |
+| **② 自启动权限（一劳永逸）** | 系统设置 → 应用设置 → 授权管理 → 自启动管理 → 允许「FV 识图桥」 | 之后每次开机由 `BOOT_COMPLETED` 自动激活；设置页「④」有跳转按钮 |
+| **③ 安装 / 更新自动** | 装 APK 时系统投递 `MY_PACKAGE_REPLACED` | 多数 ROM 会放行自身包广播；若被拦请用 ① 或 ② |
+| **④ shell 一次性激活** | 见下方命令 | 适合 adb / Termux / MT 终端，重启后可能需重跑（除非开了 ②） |
+
+```sh
+am broadcast --include-stopped-packages \
+  -a com.fvocr.bridge.WAKE -n com.fvocr.bridge/.BootReceiver
+```
+
+激活后 `OcrService` 以前台服务把 `:ocr` 进程保活（静默低优先级通知）；
+只要进程在线，FV 的 `content call` 就不会再触发唤醒拦截。
+FV 侧的 Hook 也会在检测到 `Unknown authority` 时**尝试自激活并重试**，
+但受 MIUI 限制，最可靠的仍是 ① / ②。
+
+---
+
+## v2.0.0 改了什么（合并成一个 APK）
+
+v1.0.0 是「模块 + 独立引擎 App」两个安装包，v2.0.0 按需求合并成**一个 APK**：
+
+| | v1.0.0 | v2.0.0 / v2.0.1 |
 | --- | --- | --- |
 | 安装数量 | 模块 + `MiOcrStandalone`，两个 | **一个** |
 | OCR 引擎 | 由另一个 App 的 Provider 提供 | **内置在本模块 APK** |
@@ -31,30 +96,32 @@ SHA256 逐字节一致；`OCREngine` / `OCRData` 保持 `com.xiaomi.ocr.sdk_ocr`
 
 ---
 
-## 一个 APK，两个进程
+## 一个 APK，两类进程
 
 ```
-┌─ 本模块 APK (com.fvocr.bridge) ──────────────────────────────┐
-│                                                              │
-│  ① LSPosed 注入到 FV 进程（纯 Java，不加载任何 native）        │
-│     java_init.list → ModuleMain → FvOcrHook                   │
-│     Hook recognize(Bitmap)->String                            │
-│              │                                               │
-│              │  ContentResolver.call()                        │
-│              │  Bundle 直传 Bitmap（ashmem，不受 1MB 限制）    │
-│              ▼                                               │
-│  ② 模块自身 :ocr 子进程（com.fvocr.bridge:ocr）               │
-│     OcrProvider → OcrCore → OCREngine.doOCR(Bitmap)           │
-│     libmiocr.so / libmiocr_wrapper.so / libc++_shared.so      │
-│              │                                               │
-│              ▼  Bundle{text}                                 │
-│     文本作为 recognize() 的返回值交回 FV                     │
-└──────────────────────────────────────────────────────────────┘
+┌─ 本模块 APK (com.fvocr.bridge) ──────────────────────────────────┐
+│                                                                 │
+│  ① LSPosed 注入 FV 进程（纯 Java，不加载任何 native）             │
+│     java_init.list → ModuleMain → FvOcrHook                      │
+│     Hook recognize(Bitmap)->String                               │
+│              │ ContentResolver.call() / Bundle 直传 Bitmap        │
+│              ▼ （要求 :ocr 进程已在线，否则 MIUI 会拦）           │
+│  ② 模块自身 :ocr 子进程 (com.fvocr.bridge:ocr)                    │
+│     OcrProvider → OcrCore → OCREngine.doOCR(Bitmap)              │
+│     libmiocr.so / libmiocr_wrapper.so / libc++_shared.so         │
+│     OcrService（前台常驻）  BootReceiver（自激活）                │
+│              ▼ Bundle{text}                                      │
+│     文本作为 recognize() 的返回值交回 FV                        │
+│                                                                 │
+│  ③ 主进程 SettingsActivity（MODULE_SETTINGS，无桌面图标）         │
+│     打开即激活 :ocr，显示状态 / 自检 / 自启动设置入口             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 **为什么把 native 放进 `:ocr` 子进程**：MACE / MNN 初始化时的 glog `CHECK` 失败会
 直接 `abort()`（SIGABRT），Java 的 try-catch 拦不住。进程隔离后崩溃只杀
 `com.fvocr.bridge:ocr`，FV 悬浮球与模块主进程都不受影响，下一次识别会重新拉起。
+**主进程与 FV 进程都不引用 `OcrCore` / `OCREngine`，零 native 引用。**
 
 **两级保险**：内置引擎成功就用它的结果；引擎未就绪 / 超时 / 返回失败 / 图片无字，
 一律 `chain.proceed()` 回退到 FV 自带 PaddleOCR，**识别功能不会变坏**。
@@ -63,13 +130,14 @@ SHA256 逐字节一致；`OCREngine` / `OCRData` 保持 `com.xiaomi.ocr.sdk_ocr`
 
 ## 与 GalleryOCRBridge 的区别
 
-| | GalleryOCRBridge | **FvOcrBridge v2.0.0** |
+| | GalleryOCRBridge | **FvOcrBridge v2.0.1** |
 | --- | --- | --- |
 | OCR 引擎来源 | Hook 小米相册进程，复用相册私有 `OCREngine` | 本 APK 自带 `libmiocr.so` |
 | 是否依赖小米相册 | ✅ 依赖 | ❌ 完全不依赖 |
 | LSPosed 作用域 | 相册 + FV，两个包 | **只有 FV 一个包** |
 | 安装数量 | 1 个模块 | **1 个模块** |
 | 模块是否含 so | 不含 | 含（小米私有，见「合规」） |
+| MIUI 关联启动 | 借道系统白名单相册，不受影响 | 需**激活一次**（v2.0.1 修复） |
 
 相册被精简、相册「提取文字」不可用，或不想 Hook 系统应用时，用本模块。
 
@@ -82,21 +150,11 @@ SHA256 逐字节一致；`OCREngine` / `OCRData` 保持 `com.xiaomi.ocr.sdk_ocr`
    并在 `nativeInit` 前主动预加载 `libOpenCL.so`，否则 MACE 会因
    `No OpenCL platforms found` 直接 abort。
 2. **LSPosed**（支持 libxposed API 102）与 **FV 悬浮球** `com.fooview.android.fooview`。
-3. 桌面**不会出现图标**——这是正常的，本模块没有 Activity。
-
-## 安装（三步）
-
-1. 安装本 APK（Release 附件 `FvOcrBridge-v2.0.0-release.apk`）。
-2. 打开 LSPosed → 模块 → 启用 **FV 识图桥**，作用域**只勾** `com.fooview.android.fooview`。
-3. 重启 FV 悬浮球（或重启手机）。之后直接用 FV 原来的「自动文字识别」，**不需要任何命令**。
-
-建议装完先跑一次下面的 `self_test`，确认引擎在这台机器上可用。
+3. **装完必须激活一次引擎进程**（见上面「安装」第 3 步）。
 
 ---
 
 ## Shell 命令（诊断 / 命令行识别）
-
-日常用 FV 不需要输入命令。以下命令用于验证引擎，也可供 Termux / Tasker / 其它 App 单独调用 OCR。
 
 ### ① 内置测试图自检（最推荐，不需要外部图片）
 
@@ -106,6 +164,8 @@ content call --uri content://com.fvocr.bridge.ocr --method self_test
 
 一步完成 `init` + 推理并返回识别到的文字。返回 `success=true` 且 `text` 有内容即引擎可用。
 从电脑：`adb shell content call --uri content://com.fvocr.bridge.ocr --method self_test`
+
+> 这条命令本身（从 adb shell 发起）也会把 `:ocr` 进程拉起来，可当作一次性激活手段。
 
 ### ② 引擎状态（不进推理）
 
@@ -163,8 +223,7 @@ content call --uri content://com.fvocr.bridge.ocr --method diag_step --arg 4   #
 adb logcat -s FvOcrBridge
 ```
 
-接管成功会打印 `接管成功，独立 OCR 文本长度=NN`；失败会打印具体原因，例如
-`ocr_bitmap 第1次异常: ...`、`引擎返回失败 ...`、连续失败后的冷却提示。
+接管成功会打印 `接管成功，独立 OCR 文本长度=NN`；失败会打印具体原因。
 
 ### 返回字段
 
@@ -184,12 +243,15 @@ adb logcat -s FvOcrBridge
 
 | 现象 | 处理 |
 | --- | --- |
+| 日志 `Unknown authority com.fvocr.bridge.ocr` / `Failed to find provider info` | **MIUI 关联启动拦截**：`:ocr` 进程没起来。打开 LSPosed 里本模块设置页激活一次，或执行 `am broadcast --include-stopped-packages -a com.fvocr.bridge.WAKE -n com.fvocr.bridge/.BootReceiver`；长期方案是在系统自启动管理里允许本应用 |
+| `WakePathChecker: ... Reject` | 同上，这是系统日志里的同一件事 |
+| 识别结果与以前一样（一直回退） | 先看 `adb logcat -s FvOcrBridge` 有没有 `接管成功`；确认模块已启用、作用域只勾 FV、已重启 FV、引擎已激活 |
+| 激活后过一阵又失效 | `:ocr` 进程被系统回收且再次拉起被拦；到系统自启动管理里允许本应用，开机自动激活 |
 | `self_test` 返回 `success=false` | 先跑 `probe_libs` 看 OpenCL 是否可加载；再按 `diag_step 0→4` 定位 |
 | `probe_libs` 的 `preload` 全是 `✗` | 机型 vendor 库不可访问 / 非小米 ROM，引擎在此设备跑不起来；FV 会自动回退自带识别 |
-| FV 识别结果没变化 | 看 `adb logcat -s FvOcrBridge` 有没有 `接管成功`；确认模块已启用、作用域勾的是 FV、已重启 FV |
-| 首次识别慢 / 回退 | `:ocr` 冷启动 + `nativeInit` 可能数秒，桥接给 10 秒超时并重试 2 次，预热后正常 |
+| 首次识别慢 / 回退 | `:ocr` 冷启动 + `nativeInit` 可能数秒，桥接给 12 秒超时并重试 3 次，预热后正常 |
 | 连续提示「30 秒内直接回退」 | 引擎连续 2 次不可用进入冷却，修好后 30 秒自动恢复，或重启 FV 立即恢复 |
-| 装完桌面没图标 | 正常，本模块无 Activity；在 LSPosed 模块列表里管理 |
+| 装完桌面没图标 | 正常，本模块无 LAUNCHER；在 LSPosed 模块列表里点开管理 |
 
 ---
 
@@ -204,8 +266,12 @@ adb logcat -s FvOcrBridge
 - 跨进程 `ContentResolver.call()` 把 Bitmap 放进 Bundle（`putParcelable("bitmap", ...)`），
   走 ashmem，不受 1MB Binder 事务限制；`HARDWARE` / mutable Bitmap 先复制成
   `ARGB_8888` 只读软件副本，用完 `recycle()`。
-- Binder 调用放独立守护线程限时 10 秒，避免 `:ocr` 冷启动拖死 FV 工作线程；
+- Binder 调用放独立守护线程限时 12 秒，避免 `:ocr` 冷启动拖死 FV 工作线程；
   连续失败 2 次进入 30 秒冷却。
+- **v2.0.1 唤醒修复**：`OcrService`（`:ocr` 前台常驻）、`BootReceiver`（`:ocr`，
+  `BOOT_COMPLETED` / `MY_PACKAGE_REPLACED` / `WAKE` 自激活）、`SettingsActivity`
+  （`MODULE_SETTINGS`，打开即激活）；`OcrProvider.onCreate()` 也顺带保活。
+  FV 侧捕获 `Unknown authority` 时尝试显式拉起引擎并重试（60 秒节流，失败静默回退）。
 - OCR 引擎：`OCREngine.getInstance().init(cacheDir, null).doOCR(bitmap)` →
   `OCRData.OCRResult.total_text`。`libmiocr.so` 模型内嵌 `.rodata`，不需要额外模型文件。
 - `uses-native-library` 26 个声明 + `LibProbe.preloadOpenCL()` 是 Android 12+ 能跑起来的关键，
@@ -223,7 +289,7 @@ adb logcat -s FvOcrBridge
    `app/src/main/jniLibs/arm64-v8a/`；
 2. 执行 `./gradlew assembleRelease`，产物 `app/build/outputs/apk/release/app-release.apk`。
 
-GitHub Actions 在 push 到 `main` 时做 **Java 编译校验**（因为仓库不含 so，不产出完整 APK）；
+GitHub Actions 在 push 到 `main` 时做 **Java / 资源编译校验**（因为仓库不含 so，不产出完整 APK）；
 带 so 的成品 APK 与源码包在 Release 附件里。
 
 ## 许可与合规说明

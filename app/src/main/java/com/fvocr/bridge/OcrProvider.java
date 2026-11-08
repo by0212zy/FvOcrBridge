@@ -68,6 +68,12 @@ public class OcrProvider extends ContentProvider {
         // 绝不在 onCreate 里碰 native：nativeInit 会探测 OpenCL / APU 后端，
         // 在普通 App 进程里可能直接 abort() 杀进程。引擎完全 lazy。
         Log.i(TAG, "provider ready in :ocr process (engine NOT initialized, lazy)");
+
+        // v2.0.1：只要 :ocr 进程被任何途径拉起（系统广播 / 设置页 / shell），
+        // 就前台保活。此后 FV 的 call 走「进程已运行」分支，不再触发
+        // HyperOS/MIUI WakePathChecker 的 "Unable to launch app" 拦截。
+        // 此处不加载库、不初始化引擎，仍是零 native 操作。
+        OcrService.ensure(getContext());
         return true;
     }
 

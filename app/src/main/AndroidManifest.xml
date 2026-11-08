@@ -1,14 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- 引擎进程保活与开机/更新自激活所需，全部为普通权限，不申请联网。 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
     <!--
       一个 APK 同时承担两个角色：
         · LSPosed 模块（META-INF/xposed/java_init.list）注入 FV 进程，纯 Java，不碰 native；
-        · OCR 引擎宿主：自带 libmiocr.so，OcrProvider 跑在模块自身的 :ocr 子进程，
-          所有 native 加载 / 初始化 / 推理都只发生在这个子进程。
+        · OCR 引擎宿主：自带 libmiocr.so，OcrProvider / OcrService / BootReceiver
+          跑在模块自身的 :ocr 子进程，所有 native 调用都只发生在这里。
 
-      无 Activity、无 LAUNCHER，桌面不出现图标。
-      模块名取 android:label，说明取 android:description。
+      桌面无图标：唯一的 Activity 是 MODULE_SETTINGS，只能从 LSPosed 模块列表进入。
+
+      v2.0.1 关键修复：HyperOS / MIUI 的 WakePathChecker 会拒绝普通应用（FV）
+      跨应用拉起本模块的 :ocr Provider 进程，导致 Unknown authority。
+      因此新增 OcrService（前台常驻）+ BootReceiver（系统/自身广播自激活）
+      + SettingsActivity（打开即激活），让 :ocr 进程先由模块自己拉起来。
+      只要进程已在运行，ContentProviderHelper 就走已运行分支，不再做唤醒管控。
     -->
     <application
         android:allowBackup="false"
@@ -54,13 +64,51 @@
           对外 OCR 接口：exported=true、无权限，FV 进程与 shell 都能直接 call。
           android:process=":ocr" 把 native 调用全部隔离到子进程：
           MACE / MNN 的 abort() 只会杀掉 com.fvocr.bridge:ocr，
-          FV 悬浮球与模块主进程都不受影响。
+          FV 悬浮球与模块主进程都不受影响。Provider 被拉起时顺带保活进程。
         -->
         <provider
             android:name=".OcrProvider"
             android:authorities="com.fvocr.bridge.ocr"
             android:exported="true"
             android:process=":ocr" />
+
+        <!-- v2.0.1：把 :ocr 进程前台常驻，绕开 MIUI 关联启动管控。 -->
+        <service
+            android:name=".OcrService"
+            android:exported="false"
+            android:process=":ocr"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+          v2.0.1：自激活入口，同样跑在 :ocr 进程。广播来源是系统或模块自身，
+          不属于「其它应用唤醒本应用」，不受 WakePathChecker 拦截。
+        -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:process=":ocr">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="com.fvocr.bridge.WAKE" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          模块设置页：无 LAUNCHER，桌面不出现图标；从 LSPosed 模块列表点开。
+          exported=true 让 LSPosed 管理器能从外部启动它。
+        -->
+        <activity
+            android:name=".SettingsActivity"
+            android:label="@string/app_name"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
+            </intent-filter>
+        </activity>
     </application>
 
 </manifest>

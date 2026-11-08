@@ -1,7 +1,9 @@
 package com.fvocr.bridge;
 
+import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
@@ -46,6 +48,9 @@ final class FvOcrHook {
 
     private static final AtomicInteger FAIL_STREAK = new AtomicInteger();
     private static volatile long sSkipUntil = 0L;
+    /** v2.0.1：自激活请求的节流，避免每次识别都发广播 / 拉服务。 */
+    private static volatile long sLastWake = 0L;
+    private static volatile boolean sWakeHintPrinted = false;
 
     private FvOcrHook() {
     }
@@ -170,7 +175,49 @@ final class FvOcrHook {
             sSkipUntil = System.currentTimeMillis() + Config.COOL_DOWN_MS;
             Diag.s("连续 " + n + " 次未取到内置 OCR，"
                     + (Config.COOL_DOWN_MS / 1000) + " 秒内直接回退 FV 自带识别；"
-                    + "请执行 content call --uri content://com.fvocr.bridge.ocr --method self_test 检查引擎");
+                    + "若日志出现 Unknown authority，说明 HyperOS/MIUI 关联启动拦截了 :ocr 进程，"
+                    + "请从 LSPosed 打开本模块设置页激活一次，或执行: " + Config.WAKE_CMD);
+        }
+    }
+
+    /**
+     * v2.0.1：尽力把模块自身的 :ocr 引擎进程拉起来。
+     *
+     * <p>从 FV 进程发起的跨应用启动在 HyperOS/MIUI 上通常仍会被
+     * {@code WakePathChecker} 拒绝，所以这只是「能自动就自动」的兜底；
+     * 真正可靠的是 {@link BootReceiver}（系统/自身广播）与
+     * {@link SettingsActivity}（模块自己启自己）。失败完全静默，
+     * 上层照旧回退 FV 自带识别，不会让功能变坏。
+     */
+    private static void wakeEngine(Context ctx) {
+        long now = System.currentTimeMillis();
+        if (now - sLastWake < Config.WAKE_THROTTLE_MS) {
+            return;
+        }
+        sLastWake = now;
+        try {
+            Intent svc = new Intent();
+            svc.setComponent(new ComponentName(Config.ENGINE_PKG, Config.CLS_SERVICE));
+            if (Build.VERSION.SDK_INT >= 26) {
+                ctx.startForegroundService(svc);
+            } else {
+                ctx.startService(svc);
+            }
+        } catch (Throwable ignored) {
+            // 后台启动 FGS / 关联启动被拒都属预期
+        }
+        try {
+            Intent bc = new Intent(Config.ACTION_WAKE);
+            bc.setComponent(new ComponentName(Config.ENGINE_PKG, Config.CLS_RECEIVER));
+            ctx.sendBroadcast(bc);
+        } catch (Throwable ignored) {
+            // 同上
+        }
+        if (!sWakeHintPrinted) {
+            sWakeHintPrinted = true;
+            Diag.s("检测到引擎进程未就绪（HyperOS/MIUI 关联启动拦截）。"
+                    + "已尝试自激活；若仍无效，请从 LSPosed 打开本模块设置页点一次「重新激活引擎」，"
+                    + "或执行: " + Config.WAKE_CMD);
         }
     }
 
@@ -210,7 +257,19 @@ final class FvOcrHook {
                                 + (r == null ? "null Bundle"
                                 : r.getString(Config.EXTRA_ERROR)));
                     } catch (Throwable t) {
+                        String msg = String.valueOf(t.getMessage());
+                        boolean notResident = msg.contains("Unknown authority")
+                                || msg.contains("Failed to find provider")
+                                || msg.contains("Unable to launch app");
+                        if (notResident) {
+                            // :ocr 进程根本没起来 —— MIUI 关联启动拦截的典型症状。
+                            // 尝试自激活并多等一会儿让进程冷启动完成，再重试。
+                            wakeEngine(ctx);
+                        }
                         Diag.s("ocr_bitmap 第" + (i + 1) + "次异常: " + t);
+                        if (notResident && !sleep(Config.WAKE_RETRY_MS)) {
+                            break;
+                        }
                     }
                     if (!sleep(Config.RETRY_INTERVAL_MS)) {
                         break;

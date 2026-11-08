@@ -28,6 +28,20 @@ final class Config {
     static final String CALL_URI = "content://com.fvocr.bridge.ocr";
     static final String METHOD_BITMAP = "ocr_bitmap";
 
+    /**
+     * v2.0.1：引擎进程自激活。HyperOS / MIUI 的 WakePathChecker 会拒绝
+     * FV 跨应用拉起本模块的 :ocr Provider，必须先由模块自己把 :ocr 进程
+     * 拉起并常驻（见 OcrService / BootReceiver / SettingsActivity）。
+     */
+    static final String ENGINE_PKG = "com.fvocr.bridge";
+    static final String ACTION_WAKE = "com.fvocr.bridge.WAKE";
+    static final String CLS_SERVICE = "com.fvocr.bridge.OcrService";
+    static final String CLS_RECEIVER = "com.fvocr.bridge.BootReceiver";
+    /** 一次性激活命令，失败时直接打印给用户。 */
+    static final String WAKE_CMD =
+            "am broadcast --include-stopped-packages -a com.fvocr.bridge.WAKE "
+                    + "-n com.fvocr.bridge/.BootReceiver";
+
     /** Bundle 的 key（与 OcrProvider / OcrCore.Result 对齐）。 */
     static final String EXTRA_BITMAP = "bitmap";
     static final String EXTRA_SUCCESS = "success";
@@ -35,9 +49,13 @@ final class Config {
     static final String EXTRA_ERROR = "error";
 
     /** 一次跨进程识别的整体超时。首次调用 :ocr 冷启动 + nativeInit 可能较慢。 */
-    static final long BRIDGE_TIMEOUT_MS = 10_000L;
-    static final int MAX_RETRY = 2;
+    static final long BRIDGE_TIMEOUT_MS = 12_000L;
+    static final int MAX_RETRY = 3;
     static final long RETRY_INTERVAL_MS = 400L;
+    /** v2.0.1：检测到 :ocr 进程未就绪时，自激活后额外等待的冷启动时间。 */
+    static final long WAKE_RETRY_MS = 700L;
+    /** v2.0.1：自激活请求节流，避免每次识别都发广播 / 拉服务。 */
+    static final long WAKE_THROTTLE_MS = 60_000L;
     /** 连续失败达到阈值后，短时间内不再发起 Binder 调用，避免引擎不可用时每次识别都卡住。 */
     static final int FAIL_THRESHOLD = 2;
     static final long COOL_DOWN_MS = 30_000L;
