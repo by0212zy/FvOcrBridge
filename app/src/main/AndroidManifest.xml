@@ -1,24 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 引擎进程保活与开机/更新自激活所需，全部为普通权限，不申请联网。 -->
+    <!-- 引擎常驻与开机 / 更新自激活所需，全部为普通权限，不申请联网。 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
       一个 APK 同时承担两个角色：
         · LSPosed 模块（META-INF/xposed/java_init.list）注入 FV 进程，纯 Java，不碰 native；
         · OCR 引擎宿主：自带 libmiocr.so，OcrProvider / OcrService / BootReceiver
-          跑在模块自身的 :ocr 子进程，所有 native 调用都只发生在这里。
+          全部跑在模块【主进程】，native 调用只发生在真正识别时（lazy）。
 
-      桌面无图标：唯一的 Activity 是 MODULE_SETTINGS，只能从 LSPosed 模块列表进入。
+      v2.0.2 关键修复（真机日志 LSPosed_20261108_170719.zip 钉死的根因）：
+        · v2.0.0/2.0.1 把 Provider/Service/Receiver 放在 :ocr 子进程，而
+          「激活 :ocr」这件事本身又需要 :ocr 进程先启动 —— 循环依赖。
+        · HyperOS/MIUI 把 com.fvocr.bridge 整个包的后台冷启动全禁了，连系统投递的
+          MY_PACKAGE_REPLACED 都被拦：
+            BroadcastQueueInjector: Unable to launch app ... process is not permitted to auto start
+            WakePathChecker: MIUILOG-AutoStart, Service/Provider/Broadcast Reject
+              classname=OcrProvider wakeType=4 / OcrService wakeType=8 / BootReceiver wakeType=2
+          于是 am broadcast 的 result=0 只是广播队列处理完，Receiver 根本没执行，
+          :ocr 进程 0 次启动，FV 侧一直 Unknown authority。
+        · 日志标题明确写的是 "Service/Provider/Broadcast Reject"：显式 startActivity
+          不在这道管控里（同份日志里多次 START ... result code=0）。
 
-      v2.0.1 关键修复：HyperOS / MIUI 的 WakePathChecker 会拒绝普通应用（FV）
-      跨应用拉起本模块的 :ocr Provider 进程，导致 Unknown authority。
-      因此新增 OcrService（前台常驻）+ BootReceiver（系统/自身广播自激活）
-      + SettingsActivity（打开即激活），让 :ocr 进程先由模块自己拉起来。
-      只要进程已在运行，ContentProviderHelper 就走已运行分支，不再做唤醒管控。
+      因此 v2.0.2 做两件事：
+        ① 所有组件收回主进程，链路缩到最短：主进程一起 = Provider 已发布 + 前台服务常驻，
+           不再有第二次进程冷启动，也不再依赖「应用自己拉起自己的子进程」这一未经验证的路径。
+        ② 增加 WakeActivity（透明、exported）+ LAUNCHER 图标，给用户一条显式 Activity 启动入口。
+           点图标或 am start -n 即可让主进程活起来；Activity 内同应用直启 OcrService 前台保活。
+           加图标同时解决 "MST_PackageCache: com.fvocr.bridge has not launcher icon,return" ——
+           应用才会出现在 MIUI 自启动管理列表里，可手动放行。设置页里可一键隐藏图标。
+
+      代价：放弃 :ocr 子进程的 native 崩溃隔离。MiOcrStandalone v1.0.3 已修掉导致 abort() 的
+      uses-native-library / OpenCL namespace 根因，引擎稳定；且 OcrProvider.onCreate() 仍零 native。
     -->
     <application
         android:allowBackup="false"
@@ -61,32 +78,29 @@
         <uses-native-library android:name="libPVROCL.so" android:required="false" />
 
         <!--
-          对外 OCR 接口：exported=true、无权限，FV 进程与 shell 都能直接 call。
-          android:process=":ocr" 把 native 调用全部隔离到子进程：
-          MACE / MNN 的 abort() 只会杀掉 com.fvocr.bridge:ocr，
-          FV 悬浮球与模块主进程都不受影响。Provider 被拉起时顺带保活进程。
+          v2.0.2：对外 OCR 接口跑在【主进程】。进程一起系统就 installContentProviders，
+          Provider 立即发布；此后 FV 的 call 走「进程已运行」分支，不再触发
+          ContentProviderHelper 的 "Unable to launch app" 与 WakePathChecker。
+          exported=true、无权限：FV 进程与 shell 都能直接 call。
         -->
         <provider
             android:name=".OcrProvider"
             android:authorities="com.fvocr.bridge.ocr"
-            android:exported="true"
-            android:process=":ocr" />
+            android:exported="true" />
 
-        <!-- v2.0.1：把 :ocr 进程前台常驻，绕开 MIUI 关联启动管控。 -->
+        <!-- v2.0.2：主进程前台常驻。由 WakeActivity（前台、同应用）直接启动。 -->
         <service
             android:name=".OcrService"
             android:exported="false"
-            android:process=":ocr"
             android:foregroundServiceType="dataSync" />
 
         <!--
-          v2.0.1：自激活入口，同样跑在 :ocr 进程。广播来源是系统或模块自身，
-          不属于「其它应用唤醒本应用」，不受 WakePathChecker 拦截。
+          开机 / 覆盖安装 / 手动 WAKE 的兼容入口（主进程）。
+          MIUI 上这些广播可能被拦，仅作补充；主激活路径是 WakeActivity。
         -->
         <receiver
             android:name=".BootReceiver"
-            android:exported="true"
-            android:process=":ocr">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
@@ -96,9 +110,39 @@
         </receiver>
 
         <!--
-          模块设置页：无 LAUNCHER，桌面不出现图标；从 LSPosed 模块列表点开。
-          exported=true 让 LSPosed 管理器能从外部启动它。
+          v2.0.2 显式激活入口：透明、立即结束，不留界面、不进最近任务。
+          exported=true 让桌面图标 / am start -n / FV 侧显式兜底都能启动它。
+          它只做一件事：同应用直启 OcrService 前台保活。
+          显式 startActivity 不在 MIUI "Service/Provider/Broadcast Reject" 管控里。
         -->
+        <activity
+            android:name=".WakeActivity"
+            android:label="@string/app_name"
+            android:exported="true"
+            android:noHistory="true"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!--
+          v2.0.2：桌面图标（alias 指向 WakeActivity）。
+          有 LAUNCHER 后应用才会被 MIUI 自启动管理列出，用户才能手动放行；
+          点一下图标 = 一次显式 Activity 启动 = 主进程激活 + 引擎常驻。
+          不想要图标可在设置页点「隐藏桌面图标」，MainActivity 仍可从 LSPosed 进入。
+        -->
+        <activity-alias
+            android:name=".LauncherAlias"
+            android:targetActivity=".WakeActivity"
+            android:label="@string/app_name"
+            android:icon="@android:drawable/sym_def_app_icon"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- 模块设置页：MODULE_SETTINGS，从 LSPosed 模块列表进入，可查看状态 / 自检 / 隐藏图标。 -->
         <activity
             android:name=".SettingsActivity"
             android:label="@string/app_name"

@@ -24,15 +24,15 @@ import io.github.libxposed.api.XposedModule;
 /**
  * FV 悬浮球侧（客户端）：把它的「自动文字识别」无感转发给本模块自带的 OCR 引擎。
  *
- * 一个 APK 两个进程：这里的代码被 LSPosed 注入 FV 进程（纯 Java、不碰 native），
- * 引擎跑在模块自身的 :ocr 子进程，两边用 ContentProvider.call 通信。
+ * 这里的代码被 LSPosed 注入 FV 进程（纯 Java、不碰 native），
+ * 引擎跑在模块自身【主进程】（v2.0.2 起），两边用 ContentProvider.call 通信。
  * 小米相册完全不参与，作用域只勾 FV 一个包。
  *
  * 链路：
  *   Hook FV 里所有「(Bitmap) → String、非抽象」的 recognize 方法
  *     → Bundle 直传 Bitmap（ashmem，不受 1MB Binder 事务限制）
  *     → content call content://com.fvocr.bridge.ocr / ocr_bitmap
- *     → :ocr 子进程里的 OCREngine.doOCR(Bitmap) → total_text
+ *     → 模块主进程里的 OCREngine.doOCR(Bitmap) → total_text
  *     → 文本作为 recognize() 的返回值交回 FV
  *
  * 两级保险：成功就用内置引擎结果；引擎未就绪 / 超时 / 返回失败，
@@ -48,7 +48,7 @@ final class FvOcrHook {
 
     private static final AtomicInteger FAIL_STREAK = new AtomicInteger();
     private static volatile long sSkipUntil = 0L;
-    /** v2.0.1：自激活请求的节流，避免每次识别都发广播 / 拉服务。 */
+    /** 自激活请求的节流，避免每次识别都拉 Activity / 服务 / 广播。 */
     private static volatile long sLastWake = 0L;
     private static volatile boolean sWakeHintPrinted = false;
 
@@ -136,7 +136,7 @@ final class FvOcrHook {
         }
     }
 
-    /** 用独立线程做同步 Binder 调用并限时，避免 :ocr 冷启动拖死 FV 的工作线程。 */
+    /** 用独立线程做同步 Binder 调用并限时，避免主进程冷启动拖死 FV 的工作线程。 */
     private static String bridge(Bitmap bm) {
         if (System.currentTimeMillis() < sSkipUntil) {
             return null;
@@ -175,19 +175,21 @@ final class FvOcrHook {
             sSkipUntil = System.currentTimeMillis() + Config.COOL_DOWN_MS;
             Diag.s("连续 " + n + " 次未取到内置 OCR，"
                     + (Config.COOL_DOWN_MS / 1000) + " 秒内直接回退 FV 自带识别；"
-                    + "若日志出现 Unknown authority，说明 HyperOS/MIUI 关联启动拦截了 :ocr 进程，"
-                    + "请从 LSPosed 打开本模块设置页激活一次，或执行: " + Config.WAKE_CMD);
+                    + "若日志出现 Unknown authority，说明 HyperOS/MIUI 拦截了本模块进程冷启动，"
+                    + "请点一次桌面图标「FV 识图桥」，或执行: " + Config.WAKE_CMD);
         }
     }
 
     /**
-     * v2.0.1：尽力把模块自身的 :ocr 引擎进程拉起来。
+     * v2.0.2：尽力把模块主进程<b>显式</b>拉起来。
      *
-     * <p>从 FV 进程发起的跨应用启动在 HyperOS/MIUI 上通常仍会被
-     * {@code WakePathChecker} 拒绝，所以这只是「能自动就自动」的兜底；
-     * 真正可靠的是 {@link BootReceiver}（系统/自身广播）与
-     * {@link SettingsActivity}（模块自己启自己）。失败完全静默，
-     * 上层照旧回退 FV 自带识别，不会让功能变坏。
+     * <p>真机日志证明 MIUI 的 {@code WakePathChecker} 只拦
+     * Service / Provider / Broadcast 的冷启动，显式 {@code startActivity}
+     * 不在这道管控里，所以优先走 {@link WakeActivity}（透明、silent）。
+     * Android 10+ 对后台启动 Activity 有 BAL 限制，FV 若仅在后台工作这一步
+     * 可能被系统拒绝，因此它只是「能自动就自动」的兜底；真正可靠的是用户
+     * 点一次桌面图标或执行 {@link Config#WAKE_CMD}。服务与广播两条旧路径
+     * 保留作补充。全部失败都静默，上层照旧回退 FV 自带识别，功能不会变坏。
      */
     private static void wakeEngine(Context ctx) {
         long now = System.currentTimeMillis();
@@ -195,6 +197,21 @@ final class FvOcrHook {
             return;
         }
         sLastWake = now;
+
+        // 主路径：显式 Activity。透明 + silent + 无动画，不打断用户。
+        try {
+            Intent act = new Intent();
+            act.setComponent(new ComponentName(Config.ENGINE_PKG,
+                    Config.CLS_WAKE_ACTIVITY));
+            act.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+            act.putExtra(Config.EXTRA_SILENT, true);
+            ctx.startActivity(act);
+        } catch (Throwable ignored) {
+            // BAL / 关联启动被拒都属预期，继续尝试下面两条
+        }
+
+        // 补充：同应用服务（部分 ROM 上能过）
         try {
             Intent svc = new Intent();
             svc.setComponent(new ComponentName(Config.ENGINE_PKG, Config.CLS_SERVICE));
@@ -206,6 +223,7 @@ final class FvOcrHook {
         } catch (Throwable ignored) {
             // 后台启动 FGS / 关联启动被拒都属预期
         }
+        // 补充：显式广播（v2.0.1 主路径，保留兼容）
         try {
             Intent bc = new Intent(Config.ACTION_WAKE);
             bc.setComponent(new ComponentName(Config.ENGINE_PKG, Config.CLS_RECEIVER));
@@ -216,7 +234,7 @@ final class FvOcrHook {
         if (!sWakeHintPrinted) {
             sWakeHintPrinted = true;
             Diag.s("检测到引擎进程未就绪（HyperOS/MIUI 关联启动拦截）。"
-                    + "已尝试自激活；若仍无效，请从 LSPosed 打开本模块设置页点一次「重新激活引擎」，"
+                    + "已尝试显式 Activity 自激活；若仍无效，请点一次桌面图标「FV 识图桥」，"
                     + "或执行: " + Config.WAKE_CMD);
         }
     }
@@ -262,8 +280,8 @@ final class FvOcrHook {
                                 || msg.contains("Failed to find provider")
                                 || msg.contains("Unable to launch app");
                         if (notResident) {
-                            // :ocr 进程根本没起来 —— MIUI 关联启动拦截的典型症状。
-                            // 尝试自激活并多等一会儿让进程冷启动完成，再重试。
+                            // 模块主进程根本没起来 —— MIUI 关联启动拦截的典型症状。
+                            // 显式 Activity 激活并多等一会儿让进程冷启动完成，再重试。
                             wakeEngine(ctx);
                         }
                         Diag.s("ocr_bitmap 第" + (i + 1) + "次异常: " + t);

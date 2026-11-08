@@ -18,10 +18,12 @@ import java.io.InputStream;
 /**
  * 把 OCREngine 包一层，做成模块内部可直接调用的本地 OCR。
  *
- * <p><b>v1.0.2：本类只会在 :ocr 子进程被调用</b>（见 AndroidManifest 的
- * android:process=":ocr"）。模块主进程与 FV 进程都不引用本类、不加载任何 native 库。
- * 每一次进入 native 之前都会用 {@link DiagLog} 同步刷盘，一旦 MACE 的
- * abort()/SIGSEGV 杀死子进程，仍能从落盘日志读到精确的崩溃步骤。
+ * <p><b>v2.0.2：本类只在模块主进程被调用</b>。注入 FV 进程的 LSPosed 模块代码
+ * 不引用本类、不加载任何 native 库（纯 Java 转发）。引擎收回主进程后，
+ * native 崩溃会杀掉主进程；v1.0.3 已修掉导致 MACE abort() 的
+ * OpenCL / uses-native-library namespace 根因，且每次进入 native 之前
+ * 仍用 {@link DiagLog} 同步刷盘，万一 SIGABRT / SIGSEGV 仍能从落盘日志
+ * 读到精确的崩溃步骤。
  */
 public final class OcrCore {
 

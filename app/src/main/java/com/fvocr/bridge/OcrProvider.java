@@ -21,11 +21,15 @@ import java.io.InputStream;
 /**
  * 对外入口：本模块自带的本地 OCR，供被注入的 FV 进程、shell 命令与其它 App 调用。
  *
- * <p><b>本 Provider 运行在模块自身的 :ocr 子进程</b>（AndroidManifest 的
- * android:process）。所有 native 调用都只发生在这里，与本 APK 注入 FV 进程的
- * LSPosed 模块代码完全隔离。MACE / MNN 的 glog CHECK 失败会直接 abort()
- * （SIGABRT），Java 拦不住；进程隔离后崩溃只杀掉 :ocr 子进程，
- * FV 悬浮球与模块主进程都不受影响。
+ * <p><b>v2.0.2：本 Provider 运行在模块主进程</b>。此前放在 {@code :ocr} 子进程，
+ * 但「激活 :ocr」又需要 :ocr 先启动，而 HyperOS/MIUI 禁止本包一切后台冷启动
+ * （连 {@code MY_PACKAGE_REPLACED} 都拦），形成无解循环依赖，FV 侧始终
+ * {@code Unknown authority}。收回主进程后，{@link WakeActivity} 被显式启动一次，
+ * 主进程即活、系统随即 installContentProviders 发布本 Provider 并常驻。
+ *
+ * <p>native 调用仍然完全 lazy：{@link #onCreate()} 不加载任何 so，只有真正识别
+ * 时才经 {@link OcrCore} 进入引擎。v1.0.3 已修掉导致 MACE abort() 的
+ * OpenCL namespace 根因（26 个 uses-native-library 声明 + 预加载 libOpenCL.so）。
  *
  * <pre>
  * # 一条命令提取当前屏幕文字（截屏走内存管道，不落盘）
@@ -56,7 +60,7 @@ public class OcrProvider extends ContentProvider {
     private static final String TAG = "FvOcrBridge";
     private static final int CODE_INPUT = 1;
     private static final Object LOCK = new Object();
-    /** 最近一次通过 ocr_input 管道写入的图片字节（在 :ocr 进程内）。 */
+    /** 最近一次通过 ocr_input 管道写入的图片字节（主进程内）。 */
     private static byte[] sPendingImage = null;
 
     private UriMatcher mUriMatcher;
@@ -66,13 +70,12 @@ public class OcrProvider extends ContentProvider {
         mUriMatcher = new UriMatcher(UriMatcher.NO_MATCH);
         mUriMatcher.addURI(OcrCore.AUTHORITY, "ocr_input", CODE_INPUT);
         // 绝不在 onCreate 里碰 native：nativeInit 会探测 OpenCL / APU 后端，
-        // 在普通 App 进程里可能直接 abort() 杀进程。引擎完全 lazy。
-        Log.i(TAG, "provider ready in :ocr process (engine NOT initialized, lazy)");
+        // 可能直接 abort() 杀进程。引擎完全 lazy。
+        Log.i(TAG, "provider ready in MAIN process (engine NOT initialized, lazy)");
 
-        // v2.0.1：只要 :ocr 进程被任何途径拉起（系统广播 / 设置页 / shell），
-        // 就前台保活。此后 FV 的 call 走「进程已运行」分支，不再触发
-        // HyperOS/MIUI WakePathChecker 的 "Unable to launch app" 拦截。
-        // 此处不加载库、不初始化引擎，仍是零 native 操作。
+        // v2.0.2：主进程一起就前台保活。此后 FV 的 call 走「进程已运行」分支，
+        // 不再触发 HyperOS/MIUI WakePathChecker 的 "Unable to launch app" 拦截。
+        // 同进程、同应用直启服务，不受关联启动管控；此处仍是零 native 操作。
         OcrService.ensure(getContext());
         return true;
     }
@@ -129,7 +132,7 @@ public class OcrProvider extends ContentProvider {
         b.putString("abi", android.os.Build.SUPPORTED_ABIS.length > 0
                 ? android.os.Build.SUPPORTED_ABIS[0] : "unknown");
         b.putString("authority", OcrCore.AUTHORITY);
-        b.putString("process", ":ocr");
+        b.putString("process", "main");
         b.putString("libPreload", OcrCore.getLibPreload());
         return b;
     }
@@ -143,7 +146,7 @@ public class OcrProvider extends ContentProvider {
         b.putBoolean("success", true);
         b.putString("report", LibProbe.report());
         b.putString("preload", LibProbe.preloadOpenCL());
-        b.putString("process", ":ocr");
+        b.putString("process", "main");
         return b;
     }
 

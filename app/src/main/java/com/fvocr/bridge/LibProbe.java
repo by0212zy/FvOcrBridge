@@ -7,7 +7,7 @@ import java.io.File;
 import java.io.FileReader;
 
 /**
- * 在 {@code :ocr} 子进程里探测 vendor 原生库（尤其 {@code libOpenCL.so}）的可见性。
+ * 在模块主进程里探测 vendor 原生库（尤其 {@code libOpenCL.so}）的可见性。
  *
  * <p><b>为什么需要它</b>：v1.0.2 的 tombstone 明确给出
  * {@code opencl_executor.cc:237 Check failed: !all_platforms.empty() No OpenCL platforms found}
@@ -16,7 +16,8 @@ import java.io.FileReader;
  * {@code uses-native-library} 声明，本类用来验证声明是否真的生效。
  *
  * <p>本类除 {@link #preloadOpenCL()} 外全是纯 Java 文件读取，零 native 风险；
- * 即使 preload 触发 native 崩溃，也只会杀掉 {@code :ocr} 子进程。
+ * v2.0.2 起引擎收回主进程，preload 万一触发 native 崩溃会杀主进程，
+ * 重新点一次桌面图标即可恢复。
  */
 public final class LibProbe {
 
@@ -41,7 +42,7 @@ public final class LibProbe {
     /** 供界面 / shell 展示的完整报告（纯文件读取，不加载任何 so）。 */
     public static String report() {
         StringBuilder sb = new StringBuilder();
-        sb.append("===== vendor 库可见性探测（:ocr 进程）=====\n");
+        sb.append("===== vendor 库可见性探测（主进程）=====\n");
 
         sb.append("\n--- 系统公开原生库清单 ---\n");
         boolean anyList = false;
@@ -117,7 +118,7 @@ public final class LibProbe {
      * 「库存在但不在 public.libraries.txt 里、声明被系统忽略」的机型。
      *
      * <p>只加载 OpenCL ICD loader（不含 glog 断言，不会主动 abort）；每一步都
-     * try-catch，失败仅记录文字。整个流程运行在 {@code :ocr} 子进程。
+     * try-catch，失败仅记录文字。整个流程运行在模块主进程。
      */
     public static String preloadOpenCL() {
         StringBuilder sb = new StringBuilder();

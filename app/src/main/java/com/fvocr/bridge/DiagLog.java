@@ -9,7 +9,7 @@ import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 
 /**
- * 跨进程诊断日志：写在 getFilesDir() 下（主进程与 :ocr 子进程共享同一 app data 目录）。
+ * 诊断日志：写在 getFilesDir() 下，主进程内同步刷盘（v2.0.2 起引擎与 Provider 同在主进程）。
  *
  * <p>每次进入一个可能触发 native 的步骤前，先 {@code commit()} 一步再执行。
  * 用 FileChannel.force(true) 保证真正落盘 —— native 的 abort()/SIGSEGV 会直接

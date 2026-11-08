@@ -6,7 +6,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
 
-/** 内置测试图：self_test 用，不需要任何外部图片，只在 :ocr 子进程里创建。 */
+/** 内置测试图：self_test 用，不需要任何外部图片，只在模块主进程里创建。 */
 public final class SampleBitmap {
 
     private SampleBitmap() {
