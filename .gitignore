@@ -11,3 +11,8 @@
 *.apk
 *.ap_
 *.aab
+
+# 小米私有原生库不进公开源码仓库。
+# 成品 APK 与 Release 附件内已包含；自行构建请按
+# app/src/main/jniLibs/arm64-v8a/README.md 放置这三个 so。
+/app/src/main/jniLibs/arm64-v8a/*.so

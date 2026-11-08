@@ -10,12 +10,15 @@ android {
         applicationId = "com.fvocr.bridge"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
+        // libmiocr.so 只有 arm64-v8a，jniLibs 里也只放这一套，
+        // 不显式 abiFilters，让 AGP 按目录自然只打 64 位。
     }
 
     buildTypes {
-        // 不混淆：Hook 点全部按字符串反射查找，关掉最省心。
+        // 不混淆：Hook 点按字符串反射查找；OCREngine / OCRData 的类名与字段名
+        // 更被 JNI 按字符串 FindClass / GetFieldID 硬编码，混淆会直接崩。
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("debug")
@@ -31,6 +34,11 @@ android {
         resources {
             // 现代 Xposed API 的入口 / 作用域 / 配置都在 META-INF/xposed/ 下
             merges += "META-INF/xposed/*"
+        }
+        jniLibs {
+            // 引擎会按路径 dlopen 并在 cacheDir 写 OpenCL 编译缓存，
+            // 传统解压方式（so 落到 nativeLibraryDir）最稳妥。
+            useLegacyPackaging = true
         }
     }
 

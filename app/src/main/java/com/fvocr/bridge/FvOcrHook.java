@@ -20,20 +20,20 @@ import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 
 /**
- * FV 悬浮球侧（客户端）：把它的「自动文字识别」无感转发给独立本地 OCR 引擎。
+ * FV 悬浮球侧（客户端）：把它的「自动文字识别」无感转发给本模块自带的 OCR 引擎。
  *
- * 与 GalleryOCRBridge 的区别：那个模块把 FV 转发到「小米相册进程」的私有
- * OCREngine（需要 Hook 相册、作用域要勾两个包）；本模块改成转发到独立 App
- * MiOcrStandalone 的 ContentProvider，相册完全不参与，作用域只勾 FV 一个包。
+ * 一个 APK 两个进程：这里的代码被 LSPosed 注入 FV 进程（纯 Java、不碰 native），
+ * 引擎跑在模块自身的 :ocr 子进程，两边用 ContentProvider.call 通信。
+ * 小米相册完全不参与，作用域只勾 FV 一个包。
  *
  * 链路：
  *   Hook FV 里所有「(Bitmap) → String、非抽象」的 recognize 方法
  *     → Bundle 直传 Bitmap（ashmem，不受 1MB Binder 事务限制）
- *     → content call content://com.example.miocr.standalone.ocr / ocr_bitmap
+ *     → content call content://com.fvocr.bridge.ocr / ocr_bitmap
  *     → :ocr 子进程里的 OCREngine.doOCR(Bitmap) → total_text
  *     → 文本作为 recognize() 的返回值交回 FV
  *
- * 两级保险：成功就用独立引擎结果；引擎未装 / 未就绪 / 超时 / 返回失败，
+ * 两级保险：成功就用内置引擎结果；引擎未就绪 / 超时 / 返回失败，
  * 一律 chain.proceed() 回退到 FV 自带 PaddleOCR，识别功能永不失效。
  */
 final class FvOcrHook {
@@ -168,9 +168,9 @@ final class FvOcrHook {
         int n = FAIL_STREAK.incrementAndGet();
         if (n >= Config.FAIL_THRESHOLD) {
             sSkipUntil = System.currentTimeMillis() + Config.COOL_DOWN_MS;
-            Diag.s("连续 " + n + " 次未取到独立 OCR，"
+            Diag.s("连续 " + n + " 次未取到内置 OCR，"
                     + (Config.COOL_DOWN_MS / 1000) + " 秒内直接回退 FV 自带识别；"
-                    + "请确认 MiOcrStandalone v1.0.3+ 已安装且识图可用");
+                    + "请执行 content call --uri content://com.fvocr.bridge.ocr --method self_test 检查引擎");
         }
     }
 

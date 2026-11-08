@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">FV 识图桥</string>
-    <string name="module_description">把 FV 悬浮球的「自动文字识别」接到独立本地 OCR 引擎（MiOcrStandalone），不依赖小米相册、不 Hook 相册进程。作用域只勾 com.fooview.android.fooview；引擎未装 / 未就绪 / 超时一律回退 FV 自带识别。基于 libxposed 现代 API 102，无界面、无桌面图标、不联网、不含任何 so / 模型。完整说明与诊断命令见 README.md。</string>
+    <string name="module_description">一个 APK 自带小米本地 OCR 引擎，把 FV 悬浮球「自动文字识别」无感接到该引擎；不用装第二个 App、不用小米相册、不 Hook 相册进程。作用域只勾 com.fooview.android.fooview，引擎跑在模块自身 :ocr 子进程，未就绪 / 超时自动回退 FV 自带识别。基于 libxposed 现代 API 102，无界面、无桌面图标、不联网。完整说明与诊断命令见 README.md。</string>
 </resources>

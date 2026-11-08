@@ -16,8 +16,9 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
  * 严格按包名分流：只在 com.fooview.android.fooview 里安装 FvOcrHook，
  * 同进程内被 LSPosed 回调的其它包（gms / webview 等）一律跳过。
  *
- * 不 Hook 小米相册、不修改系统属性、不改 Settings 数据库、不联网、
- * 不打包任何第三方 OCR / so / 模型。OCR 引擎由独立 App MiOcrStandalone 提供。
+ * 不 Hook 小米相册、不修改系统属性、不改 Settings 数据库、不联网。
+ * OCR 引擎内置在本 APK 的 :ocr 子进程（OcrProvider），不需要第二个 App；
+ * 本类运行在 FV 进程，纯 Java，不加载任何 native 库。
  */
 public class ModuleMain extends XposedModule {
 

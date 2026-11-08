@@ -1,12 +1,66 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 纯后台 Xposed 模块：无 Activity、无 LAUNCHER、不设启动图标。
-         桌面不会出现图标，LSPosed 模块页也不会有可打开的界面。
-         模块名取 android:label，说明取 android:description。 -->
+    <!--
+      一个 APK 同时承担两个角色：
+        · LSPosed 模块（META-INF/xposed/java_init.list）注入 FV 进程，纯 Java，不碰 native；
+        · OCR 引擎宿主：自带 libmiocr.so，OcrProvider 跑在模块自身的 :ocr 子进程，
+          所有 native 加载 / 初始化 / 推理都只发生在这个子进程。
+
+      无 Activity、无 LAUNCHER，桌面不出现图标。
+      模块名取 android:label，说明取 android:description。
+    -->
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
-        android:description="@string/module_description" />
+        android:description="@string/module_description">
+
+        <!--
+          Android 12(API 31)+ 普通 App 默认处于 classloader-namespace，
+          不能 dlopen /vendor 下的私有原生库。libmiocr.so 用 MACE 的 OpenCL 后端，
+          需要 clGetPlatformIDs() 拿到 GPU platform；缺声明会枚举到 0 个平台，
+          MACE 的 glog CHECK 失败 → abort() → SIGABRT（native 崩溃 Java 拦不住）。
+          下面 26 个声明照抄小米相册 APK（23 个）+ MACE 硬编码候选（3 个 OpenCL 实现）。
+          全部 required=false：机型上不存在的库直接跳过，不影响安装。
+        -->
+        <uses-native-library android:name="libapuwareutils_v2.mtk.so" android:required="false" />
+        <uses-native-library android:name="libneuronusdk_adapter.mtk.so" android:required="false" />
+        <uses-native-library android:name="libc++.so" android:required="false" />
+        <uses-native-library android:name="libbase.so" android:required="false" />
+        <uses-native-library android:name="ld-android.so" android:required="false" />
+        <uses-native-library android:name="libdl_android.so" android:required="false" />
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
+        <uses-native-library android:name="libcgrouprc.so" android:required="false" />
+        <uses-native-library android:name="libprocessgroup.so" android:required="false" />
+        <uses-native-library android:name="libcutils.so" android:required="false" />
+        <uses-native-library android:name="libutils.so" android:required="false" />
+        <uses-native-library android:name="libhardware.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libhidlbase.so" android:required="false" />
+        <uses-native-library android:name="vendor.qti.hardware.dsp@1.0..so" android:required="false" />
+        <uses-native-library android:name="libdmabufheap.so" android:required="false" />
+        <uses-native-library android:name="libvmmem.so" android:required="false" />
+        <uses-native-library android:name="libbinder.so" android:required="false" />
+        <uses-native-library android:name="libqape.qti.so" android:required="false" />
+        <uses-native-library android:name="libSNPE.so" android:required="false" />
+        <uses-native-library android:name="libadsprpc.so" android:required="false" />
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
+        <uses-native-library android:name="libsdsprpc.so" android:required="false" />
+        <uses-native-library android:name="libGLES_mali.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL-pixel.so" android:required="false" />
+        <uses-native-library android:name="libPVROCL.so" android:required="false" />
+
+        <!--
+          对外 OCR 接口：exported=true、无权限，FV 进程与 shell 都能直接 call。
+          android:process=":ocr" 把 native 调用全部隔离到子进程：
+          MACE / MNN 的 abort() 只会杀掉 com.fvocr.bridge:ocr，
+          FV 悬浮球与模块主进程都不受影响。
+        -->
+        <provider
+            android:name=".OcrProvider"
+            android:authorities="com.fvocr.bridge.ocr"
+            android:exported="true"
+            android:process=":ocr" />
+    </application>
 
 </manifest>
